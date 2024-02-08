@@ -23,9 +23,13 @@ class DETR(nn.Module):
     4. Prediction Heads
         FFN to transform representations into set predictions
 
+
+    Parameters:
+        N (int): Decoder query slots, or maximum number of objects that can be detected at once
+
     """
 
-    def __init__(self, N):
+    def __init__(self, N=100):
         super(DETR, self).__init__()
 
         # hyper-parameters
@@ -34,7 +38,7 @@ class DETR(nn.Module):
         # modules
         self.backbone = Backbone()
         self.encoder = Encoder()
-        self.decoder = Decoder()
+        self.decoder = Decoder(N)
         self.pred_heads = FeedForward()
 
     def forward(self, x):
@@ -46,8 +50,12 @@ class DETR(nn.Module):
 
         """
         x = self.backbone(x)
+        print(x.shape)
         x = self.encoder(x)
+        print(x.shape)
         x = self.decoder(x)
+        print(x.shape)
         x = self.pred_heads(x)
+        print(x.shape)
 
         return x
