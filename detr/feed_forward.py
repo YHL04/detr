@@ -31,3 +31,23 @@ class FeedForward(nn.Module):
 
     def forward(self, x):
         return self.ff(x)
+
+
+class PredictionFeedForward(nn.Module):
+    """
+    Bounding box prediction MLP for DETR coordinates output
+    """
+    def __init__(self, dim):
+        super(PredictionFeedForward, self).__init__()
+
+        self.ff = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.GELU(),
+            nn.Linear(dim, dim),
+            nn.GELU(),
+            nn.Linear(dim, 4)
+        )
+
+    def forward(self, x):
+        return self.ff(x)
+

@@ -2,11 +2,10 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 from .feed_forward import FeedForward
-from .pos_emb import PositionalEncoding
-from .attention import Attention
 
 
 class Encoder(nn.Module):
@@ -16,20 +15,20 @@ class Encoder(nn.Module):
     Taking in (flattened resnet representation + positional encoding) as input
     """
 
-    def __init__(self, vocab_size):
+    def __init__(self, n_layers, d_model, n_head, p):
         super(Encoder, self).__init__()
-        self.transformer = Transformer(
-            vocab_size=vocab_size,
-            max_len=512,
-            n_layers=4,
-            d_model=768,
-            n_head=8,
-            p=0.1,
-            device="cuda",
-        )
 
-    def forward(self, x):
-        return self.transformer(x)
+        self.layers = nn.ModuleList([EncoderLayer(d_model=d_model,
+                                                  ffn_hidden=4 * d_model,
+                                                  n_head=n_head,
+                                                  p=p)
+                                    for _ in range(n_layers)])
+
+    def forward(self, x, pos_emb):
+        for layer in self.layers:
+            x = layer(x + pos_emb)
+
+        return x
 
 
 class Decoder(nn.Module):
@@ -39,86 +38,26 @@ class Decoder(nn.Module):
     Taking in encoder outputs and outputting representations for prediction heads
     """
 
-    def __init__(self, vocab_size):
+    def __init__(self, n_layers, d_model, n_head, p):
         super(Decoder, self).__init__()
-        self.transformer = Transformer(
-            vocab_size=vocab_size,
-            max_len=512,
-            n_layers=4,
-            d_model=768,
-            n_head=8,
-            p=0.1,
-            device="cuda",
-        )
 
-    def forward(self, x):
-        return self.transformer(x)
-
-
-class Transformer(nn.Module):
-    """
-    A standard Transformer module that outputs the unprocessed
-    output of the last transformer layer
-
-    Parameters:
-        vocab_size (int): Vocabulary size
-        max_len (int): Max length
-        n_layers (int): Number of layers
-        d_model (int): Dimension of transformer
-        n_head (int): Number of attention heads
-        p (int): Dropout probability
-
-    """
-
-    def __init__(self,
-                 vocab_size,
-                 max_len=512,
-                 n_layers=4,
-                 d_model=768,
-                 n_head=8,
-                 p=0.1,
-                 device="cuda",
-                 **kwargs
-                 ):
-
-        super(Transformer, self).__init__()
-        self.n_layers = n_layers
-        self.d_model = d_model
-        self.device = device
-
-        self.embedding = TransformerEmbedding(vocab_size=vocab_size,
-                                              d_model=d_model,
-                                              max_len=max_len,
-                                              device=device)
-
-        self.layers = nn.ModuleList([AttentionLayer(d_model=d_model,
-                                                    ffn_hidden=4 * d_model,
-                                                    n_head=n_head,
-                                                    p=p)
+        self.layers = nn.ModuleList([DecoderLayer(d_model=d_model,
+                                                  ffn_hidden=4 * d_model,
+                                                  n_head=n_head,
+                                                  p=p)
                                     for _ in range(n_layers)])
 
-    def forward(self, ids, is_causal):
-        """
-        Computes transformer output
-
-        Parameters:
-        ids (Tensor[batch_size, length]): tokens
-        state (Tensor[batch_size, state_len, d_model]): recurrent state
-
-        Returns:
-        x (Tensor[batch_size, length, d_model]): output
-        state (Tensor[batch_size, length, d_model]): next recurrent state
-
-        """
-        x = self.embedding(ids)
+    def forward(self, obj_queries, kv):
+        x = torch.zeros_like(obj_queries, dtype=torch.float32)
 
         for layer in self.layers:
-            x = layer(x, is_causal=is_causal)
+            x = x + obj_queries
+            x = layer(x, kv)
 
         return x
 
 
-class AttentionLayer(nn.Module):
+class EncoderLayer(nn.Module):
     """
     Class representing a standard transformer layer. This layer includes self-attention,
     normalization, dropout, and a feed-forward network
@@ -131,7 +70,7 @@ class AttentionLayer(nn.Module):
     """
 
     def __init__(self, d_model, ffn_hidden, n_head, p):
-        super(AttentionLayer, self).__init__()
+        super(EncoderLayer, self).__init__()
         self.attention = Attention(d_model=d_model, n_head=n_head)
         self.norm1 = nn.LayerNorm(d_model)
         self.dropout1 = nn.Dropout(p=p)
@@ -148,6 +87,58 @@ class AttentionLayer(nn.Module):
         x = self.norm1(x + _x)
         x = self.dropout1(x)
 
+        _x = x
+        x = self.ffn(x)
+
+        x = self.norm2(x + _x)
+        x = self.dropout2(x)
+
+        return x
+
+
+class DecoderLayer(nn.Module):
+    """
+    Class representing a standard transformer layer. This layer includes self-attention,
+    normalization, dropout, and a feed-forward network
+
+    Args:
+        d_model (int): The dimension of the model
+        ffn_hidden (int): The size of the hidden layer in the feed forward network
+        n_head (int): The number of attention heads
+        p (float): The probability of dropout
+    """
+
+    def __init__(self, d_model, ffn_hidden, n_head, p):
+        super(DecoderLayer, self).__init__()
+        self.self_attention = Attention(d_model=d_model, n_head=n_head)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.dropout1 = nn.Dropout(p=p)
+
+        self.cross_attention = Attention(d_model=d_model, n_head=n_head)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout2 = nn.Dropout(p=p)
+
+        self.ffn = FeedForward(dim=d_model, inner_dim=ffn_hidden)
+        self.norm3 = nn.LayerNorm(d_model)
+        self.dropout3 = nn.Dropout(p=p)
+
+    def forward(self, x, kv, mask=None, is_causal=False):
+        """Compute the output of the transformer layer"""
+        # Self attention
+        _x = x
+        x = self.self_attention(q=x, kv=x, mask=mask, is_causal=is_causal)
+
+        x = self.norm1(x + _x)
+        x = self.dropout1(x)
+
+        # Cross attention
+        _x = x
+        x = self.cross_attention(q=x, kv=kv, mask=mask, is_causal=is_causal)
+
+        x = self.norm1(x + _x)
+        x = self.dropout1(x)
+
+        # Feed forward
         _x = x
         x = self.ffn(x)
 
@@ -196,27 +187,86 @@ class TokenEmbedding(nn.Module):
         return token_emb
 
 
-class TransformerEmbedding(nn.Module):
+class Attention(nn.Module):
     """
-    Transformer Embedding, combining positional encoding and token embedding
+    Attention module for Transformer layers.
+    Composes of learnable parameters in
+    query, key, value and concat linear modules.
     """
 
-    def __init__(self, vocab_size, d_model, max_len, device):
-        super(TransformerEmbedding, self).__init__()
-        self.tok_emb = TokenEmbedding(vocab_size, d_model)
-        self.pos_emb = PositionalEncoding(d_model, max_len, device)
+    def __init__(self, d_model, n_head):
+        super(Attention, self).__init__()
+        self.n_head = n_head
 
-    def forward(self, x):
+        self.w_q = nn.Linear(d_model, d_model, bias=True)
+        self.w_k = nn.Linear(d_model, d_model, bias=True)
+        self.w_v = nn.Linear(d_model, d_model, bias=True)
+        self.w_concat = nn.Linear(d_model, d_model, bias=True)
+
+        # self.w_q = nn.Linear(d_model, d_model, bias=False)
+        # self.w_kv = nn.Linear(d_model, 2 * (d_model // n_head), bias=False)
+        # self.w_concat = nn.Linear(d_model, d_model, bias=False)
+
+    def forward(self, q, kv, mask=None, is_causal=False):
         """
-        Returns complete transformer embedding for transformer layers
-
         Parameters:
-        x : [batch_size, length]
+        q:     [batch_size, length, d_model]
+        kv:    [batch_size, length, d_model]
 
         Returns:
-        token_emb + pos_emb : [batch_size, length, dim]
+        out:   [batch_size, length, d_model]
         """
-        token_emb = self.tok_emb(x)
-        pos_emb = self.pos_emb(token_emb)
-        return token_emb + pos_emb
+        q, k, v = self.w_q(q), self.w_k(kv), self.w_v(kv)
+        q, k, v = self.split(q), self.split(k), self.split(v)
+
+        # q, k, v = self.w_q(q), *self.w_kv(kv).chunk(2, dim=-1)
+        # q, k, v = self.split(q), k.unsqueeze(1), v.unsqueeze(1)
+
+        # q = q.to(torch.float16)
+        # k = k.to(torch.float16)
+        # v = v.to(torch.float16)
+
+        # with torch.backends.cuda.sdp_kernel(
+        #         enable_flash=True
+        # ):
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, is_causal=is_causal)
+
+        # out = out.to(torch.float32)
+
+        out = self.concat(out)
+        out = self.w_concat(out)
+
+        return out
+
+    def split(self, tensor):
+        """
+        Split tensor into number of head
+
+        Parameters:
+        tensor : [batch_size, length, d_model]
+
+        Returns:
+        tensor : [batch_size, head, length, d_tensor]
+        """
+        batch_size, length, d_model = tensor.shape
+
+        d_tensor = d_model // self.n_head
+        tensor = tensor.view(batch_size, length, self.n_head, d_tensor).transpose(1, 2)
+
+        return tensor
+
+    def concat(self, tensor):
+        """
+        Inverse function of self.split(tensor : torch.Tensor)
+
+        Parameters:
+        tensor : [batch_size, head, length, d_tensor]
+        Returns:
+        tensor : [batch_size, length, d_model]
+        """
+        batch_size, head, length, d_tensor = tensor.shape
+        d_model = head * d_tensor
+
+        tensor = tensor.transpose(1, 2).contiguous().view(batch_size, length, d_model)
+        return tensor
 

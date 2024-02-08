@@ -28,8 +28,8 @@ class PositionalEncoding(nn.Module):
 
     def forward(self, x):
         """Obtain positional encoding according to input size"""
-        batch_size, seq_len, d_model = x.size()
-        return self.encoding[:seq_len, :].to(x.device)
+        B, S, D = x.size()
+        return self.encoding[:S, :].to(x.device)
 
 
 class LearnedPositionalEncoding(nn.Module):
@@ -48,6 +48,6 @@ class LearnedPositionalEncoding(nn.Module):
 
     def forward(self, x):
         """Return learned positional encoding according to input shape"""
-        batch_size, seq_len, d_model = x.size()
-        return self.encoding[:seq_len, :]
+        B, S, D = x.size()
+        return self.encoding[:S, :].unsqueeze(0).repeat(B, 1, 1)
 
